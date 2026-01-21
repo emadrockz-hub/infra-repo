@@ -1,33 +1,42 @@
-name: Terraform (EC2)
+name: Terraform Apply (OIDC) - Secrets Only
 
 on:
   push:
     branches: ["main"]
+    paths:
+      - "**/*.tf"
+      - ".github/workflows/terraform.yml"
   workflow_dispatch:
 
 permissions:
   id-token: write
   contents: read
 
-env:
-  TF_IN_AUTOMATION: "true"
-  AWS_REGION: ${{ vars.AWS_REGION }}
-
 jobs:
   terraform:
     runs-on: ubuntu-latest
+
+    env:
+      TF_IN_AUTOMATION: "true"
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+
+      # pass TF vars via environment (secrets-only)
+      TF_VAR_aws_region: ${{ secrets.AWS_REGION }}
+      TF_VAR_key_name: ${{ secrets.EC2_KEY_NAME }}
+      TF_VAR_my_ip_cidr: ${{ secrets.MY_IP_CIDR }}
+      TF_VAR_project_name: "three-container-app"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Configure AWS credentials (OIDC)
+      - name: Configure AWS Credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Install Terraform
+      - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.7.5"
@@ -38,8 +47,8 @@ jobs:
       - name: Ensure remote state bucket exists
         run: |
           set -e
-          BUCKET="${{ vars.TF_STATE_BUCKET }}"
-          REGION="${{ env.AWS_REGION }}"
+          BUCKET="${{ secrets.TF_STATE_BUCKET }}"
+          REGION="${{ secrets.AWS_REGION }}"
           if aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
             echo "Bucket exists: $BUCKET"
           else
@@ -56,7 +65,7 @@ jobs:
       - name: Ensure DynamoDB lock table exists
         run: |
           set -e
-          TABLE="${{ vars.TF_STATE_DDB_TABLE }}"
+          TABLE="${{ secrets.TF_STATE_DDB_TABLE }}"
           if aws dynamodb describe-table --table-name "$TABLE" >/dev/null 2>&1; then
             echo "DynamoDB table exists: $TABLE"
           else
@@ -69,34 +78,24 @@ jobs:
             aws dynamodb wait table-exists --table-name "$TABLE"
           fi
 
-      - name: Terraform init
+      - name: Terraform init (remote state)
         run: |
-          terraform init \
-            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
-            -backend-config="key=${{ vars.TF_STATE_KEY }}" \
-            -backend-config="region=${{ env.AWS_REGION }}" \
-            -backend-config="dynamodb_table=${{ vars.TF_STATE_DDB_TABLE }}" \
+          terraform init -input=false -no-color \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=${{ secrets.TF_STATE_KEY }}" \
+            -backend-config="region=${{ secrets.AWS_REGION }}" \
+            -backend-config="dynamodb_table=${{ secrets.TF_STATE_DDB_TABLE }}" \
             -backend-config="encrypt=true"
 
       - name: Terraform validate
-        run: terraform validate
+        run: terraform validate -no-color
 
       - name: Terraform plan
-        env:
-          TF_VAR_aws_region: ${{ vars.AWS_REGION }}
-          TF_VAR_key_name: ${{ vars.EC2_KEY_NAME }}
-          TF_VAR_my_ip_cidr: ${{ vars.MY_IP_CIDR }}
-          TF_VAR_project_name: ${{ vars.PROJECT_NAME }}
-        run: terraform plan -out=tfplan
+        run: terraform plan -input=false -no-color -lock-timeout=2m
 
       - name: Terraform apply
         if: github.ref == 'refs/heads/main'
-        run: terraform apply -auto-approve tfplan
+        run: terraform apply -auto-approve -input=false -no-color -lock-timeout=2m
 
-      - name: Show outputs
-        env:
-          TF_VAR_aws_region: ${{ vars.AWS_REGION }}
-          TF_VAR_key_name: ${{ vars.EC2_KEY_NAME }}
-          TF_VAR_my_ip_cidr: ${{ vars.MY_IP_CIDR }}
-          TF_VAR_project_name: ${{ vars.PROJECT_NAME }}
-        run: terraform output
+      - name: Terraform output
+        run: terraform output -no-color
